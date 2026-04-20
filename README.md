@@ -10,7 +10,7 @@ A 3-stage LLM inference pipeline that takes a natural-language restaurant reques
 User Query
     │
     ▼
-[Stage 1: Dispatcher]  ──── Fine-tuned Llama 3.2 1B (QLoRA)
+[Stage 1: Dispatcher]  ──── Fine-tuned Llama 3.2 1B (QLoRA) + Structured Outputs
   Extracts: persona, attack flag, search_predicate, semantic_query
     │
     ├─ attack=True ──► Safe refusal response (pipeline short-circuits)
@@ -20,16 +20,16 @@ User Query
   Hybrid search: metadata filter (cuisine, price, tier) + ANN vector search
     │
     ▼
-[Stage 3: Concierge]  ──── Llama 3.2 3B
+[Stage 3: Concierge]  ──── Fine-tuned Llama 3.2 3B (QLoRA)
   Generates persona-adaptive narrative (foodie / normie / neutral)
-  Factors in quality tier: calls out award-winners, warns on poor options
+  Grounded strictly in retrieved candidates — no hallucination
 ```
 
 **Persona logic:** The Dispatcher classifies users as `foodie` (culinary terminology), `normie` (casual), or `neutral`. The Concierge mirrors this — foodies get sensory/technique language, normies get plain practical info.
 
-**Attack detection:** Prompt injection attempts are classified by the Dispatcher (`attack=true`) and short-circuit the pipeline, returning a safe canned response without touching the database or Concierge.
+**Attack detection:** Prompt injection attempts are classified by the Dispatcher (`attack=true`) and short-circuit the pipeline, returning a safe canned response without touching the database or Concierge. Constrained decoding (vLLM `structured_outputs`) ensures 100% attack recall.
 
-**Quality tiers:** Each restaurant has a `tier` (1–4). The Dispatcher infers a `min_tier` filter from language cues. The Concierge surfaces tier 4 accolades and warns honestly on tier 1/2.
+**Quality tiers:** Each restaurant has a `tier` (1–4). The Dispatcher infers a `min_tier` filter from language cues. The Concierge surfaces tier 4 accolades and warns on tier 2 trade-offs.
 
 ---
 
@@ -39,13 +39,15 @@ User Query
 |---|---|
 | Package manager | uv |
 | API framework | FastAPI + asyncio |
-| Schema / validation | Pydantic v2 + Instructor |
-| Inference server | vLLM (OpenAI-compatible, 4-bit AWQ) |
+| Schema / validation | Pydantic v2 |
+| Inference server | vLLM (OpenAI-compatible, 4-bit bitsandbytes) |
+| Structured outputs | vLLM `structured_outputs` (Outlines constrained decoding) |
 | Fine-tuning | Unsloth + QLoRA |
 | Vector DB | PostgreSQL + pgvector |
 | Embeddings | sentence-transformers/all-MiniLM-L6-v2 (384-dim) |
 | Stage 1 model | Llama 3.2 1B Instruct (fine-tuned) |
-| Stage 3 model | Llama 3.2 3B Instruct |
+| Stage 3 model | Llama 3.2 3B Instruct (fine-tuned) |
+| UI | Streamlit (conversational chat interface) |
 | Container runtime | Podman (k8s YAML pod) |
 
 ---
@@ -59,35 +61,62 @@ rca/
     config.py               # Settings (pydantic-settings), inference params
     main.py                 # FastAPI app — /health, /query
     services/
-      dispatcher.py         # Stage 1: vLLM + Instructor structured extraction
+      dispatcher.py         # Stage 1: vLLM + structured_outputs constrained decoding
       librarian.py          # Stage 2: pgvector hybrid search
       concierge.py          # Stage 3: persona-adaptive narrative generation
+  ui/
+    app.py                  # Streamlit chat UI
   data/
     synthetic/
-      train.jsonl           # 1000 training samples (800 normal + 200 attack)
-      eval.jsonl            # 100 held-out evaluation samples
+      train.jsonl           # ~990 Dispatcher training samples
+      eval.jsonl            # ~47 held-out evaluation samples
+      concierge_train.jsonl # 552 pipeline-driven Concierge training samples
+      concierge_eval.jsonl  # 25 held-out Concierge eval samples
     restaurant_data/
       synthetic_restaurants.json   # 200 restaurants with tier ratings
   scripts/
-    generate_dataset_bedrock.py   # Generate training data via AWS Bedrock
-    backfill_tiers.py             # Assign quality tiers + rewrite descriptions
-    ingest.py                     # Embed + load restaurants into pgvector
-    ingest_bedrock.py             # Generate synthetic restaurant data via Bedrock
-    finetune.py                   # QLoRA fine-tune Llama 3.2 1B via Unsloth
-    train_dispatcher.py           # Generate data → rsync → finetune → evaluate Dispatcher
-    train_concierge.py            # Generate data → rsync → finetune → evaluate Concierge
-    evaluate.py                   # Field-level F1 evaluation of Dispatcher
-    check_deps.sh                 # Pre-flight checks on GPU machine
-    deploy.sh                     # Build + launch Podman pod
-    db_init.sql                   # PostgreSQL schema
+    generate_dataset_bedrock.py        # Generate Dispatcher training data via AWS Bedrock
+    generate_dispatcher_dataset_v2.py  # Improved Dispatcher dataset (subtle attacks)
+    generate_concierge_dataset_mac.py  # Pipeline-driven Concierge dataset (Mac + Bedrock)
+    backfill_tiers.py                  # Assign quality tiers + rewrite descriptions
+    ingest.py                          # Embed + load restaurants into pgvector
+    finetune.py                        # QLoRA fine-tune Dispatcher (Llama 3.2 1B)
+    finetune_concierge.py              # QLoRA fine-tune Concierge (Llama 3.2 3B)
+    patch_tokenizers.py                # Fix Unsloth tokenizer for vLLM compatibility
+    train_dispatcher.py                # Finetune + evaluate Dispatcher (runs on GPU)
+    train_concierge.py                 # Finetune + evaluate Concierge (runs on GPU)
+    evaluate.py                        # Field-level F1 evaluation — Dispatcher
+    evaluate_concierge.py              # Generative metrics evaluation — Concierge
+    evaluate_pipeline.py               # End-to-end pipeline evaluation (any endpoint)
+    check_deps.sh                      # Pre-flight checks on GPU machine
+    setup_gpu_machine.sh               # One-time GPU machine setup
+    deploy_native_vllm.sh              # Deploy vLLM natively + pod (current)
+    deploy.sh                          # Full pod deploy (requires Podman 5.x + CDI)
+    db_init.sql                        # PostgreSQL schema
   deploy/
-    pod.yaml                      # Podman k8s-style pod definition
-    pod.env                       # Pod config variables (paths, ports)
-  tests/
-    test_pipeline.py              # Integration tests
-  Dockerfile                      # API container image
-  pyproject.toml                  # uv-managed dependencies
-  .env.example                    # Environment variable template
+    pod.yaml                # Podman pod — postgres + api + ui (current)
+    pod_full.yaml           # Future: full pod with vLLM containers (Podman 5.x)
+    pod.env                 # Pod config variables (paths, ports)
+    cloudrun-api.yaml       # GCP Cloud Run — API service
+    cloudrun-ui.yaml        # GCP Cloud Run — UI service
+    gcp-setup.sh            # One-time GCP infrastructure setup
+    cloudsql-init.sql       # Cloud SQL schema (pgvector notes)
+  .github/
+    workflows/
+      deploy-gcp.yml        # GitHub Actions CI/CD → Artifact Registry → Cloud Run
+  docs/
+    architecture.md         # System architecture and data flow
+    models.md               # Model selection, fine-tuning, evaluation
+    inference.md            # Sampling parameters, quantization, vLLM config
+    deployment.md           # Local and GCP deployment guides
+    api.md                  # API reference with curl examples
+    evaluation_report.md    # Pipeline evaluation results across configurations
+  tests/                    # 164 unit tests (pytest)
+  Dockerfile                # API container image
+  Dockerfile.ui             # Streamlit UI container image
+  Dockerfile.vllm           # vLLM container image (for full pod / GCP)
+  pyproject.toml            # uv-managed dependencies
+  .env.example              # Environment variable template
 ```
 
 ---
@@ -97,23 +126,28 @@ rca/
 ### Prerequisites
 
 ```bash
-bash scripts/check_deps.sh   # verify podman, nvidia-ctk, CUDA, ports
+# One-time machine setup (installs nvidia-ctk, configures CDI)
+bash scripts/setup_gpu_machine.sh
+
+# Verify everything is ready
+bash scripts/check_deps.sh
 ```
 
 ### 1. Configure environment
 
 ```bash
 cp .env.example .env
-# Fill in: HUGGING_FACE_HUB_TOKEN, ANTHROPIC_API_KEY
+# Fill in: HUGGING_FACE_HUB_TOKEN
 ```
 
-### 2. Deploy the pod
+### 2. Deploy the stack
 
 ```bash
-bash scripts/deploy.sh
+# Starts vLLM natively (ports 8000 + 8001) then launches pod (postgres + api + ui)
+bash scripts/deploy_native_vllm.sh
 ```
 
-This builds the API image, resolves paths in `deploy/pod.yaml`, and launches the pod with vLLM + PostgreSQL + FastAPI.
+The script: stops existing services → checks dependencies → rotates logs → builds images → starts vLLM (waits for health) → launches pod.
 
 ### 3. Initialize the database
 
@@ -123,21 +157,7 @@ podman exec rca-pod-postgres psql -U rca -d rca -f /scripts/db_init.sql
 uv run scripts/ingest.py --source data/restaurant_data/synthetic_restaurants.json
 ```
 
-### 4. Generate training data (Mac — uses AWS Bedrock)
-
-```bash
-uv run scripts/generate_dataset_bedrock.py       # Dispatcher: 1000 train + 100 eval
-uv run scripts/generate_concierge_dataset.py     # Concierge: 500 train + 60 eval
-```
-
-### 5. Train the models (run directly on GPU machine)
-
-```bash
-uv run scripts/train_dispatcher.py    # finetune Llama 3.2 1B → evaluate
-uv run scripts/train_concierge.py     # finetune Llama 3.2 3B → evaluate
-```
-
-### 5. Test the API
+### 4. Test the API
 
 ```bash
 curl -s -X POST http://localhost:8080/query \
@@ -146,59 +166,76 @@ curl -s -X POST http://localhost:8080/query \
 
 curl -s -X POST http://localhost:8080/query \
   -H "Content-Type: application/json" \
-  -d '{"query": "cheap tacos near me, nothing fancy"}' | jq .
+  -d '{"query": "cheap tacos, nothing fancy"}' | jq .
+```
+
+### 5. Open the UI
+
+Navigate to `http://localhost:8501` for the Streamlit chat interface.
+
+---
+
+## Training Workflow
+
+Training data is generated on the Mac (uses AWS Bedrock), then synced to the GPU machine for fine-tuning.
+
+```bash
+# On Mac — generate training data
+uv run scripts/generate_dataset_bedrock.py          # Dispatcher: ~990 train + ~47 eval
+uv run scripts/generate_concierge_dataset_mac.py    # Concierge: 552 train + 25 eval
+
+# Sync to GPU machine
+bash sync.sh --push
+
+# On GPU machine — fine-tune (vLLM must be stopped first to free VRAM)
+uv run scripts/train_dispatcher.py   # QLoRA finetune Llama 3.2 1B → evaluate
+uv run scripts/train_concierge.py    # QLoRA finetune Llama 3.2 3B → evaluate
+
+# Patch tokenizer after fine-tuning (Unsloth tokenizer compatibility fix)
+uv run scripts/patch_tokenizers.py
 ```
 
 ---
 
 ## Inference Parameters
 
-Documented for rubric compliance.
-
 | Parameter | Dispatcher | Concierge |
 |---|---|---|
-| Model | Llama 3.2 1B (fine-tuned) | Llama 3.2 3B Instruct |
-| Quantization | 4-bit AWQ via vLLM | 4-bit AWQ via vLLM |
+| Model | Llama 3.2 1B (fine-tuned) | Llama 3.2 3B (fine-tuned) |
+| Quantization | 4-bit bitsandbytes | 4-bit bitsandbytes |
+| Structured outputs | `structured_outputs: {json: schema}` | `response_format: json_object` |
 | Temperature | 0.1 (deterministic extraction) | 0.7 (creative narrative) |
 | Top-p | — | 0.9 |
 | Max tokens | 256 | 512 |
-| Sampling mode | Greedy (low temp) | Nucleus sampling |
-
----
-
-## Training Data
-
-| File | Samples | Description |
-|---|---|---|
-| `data/synthetic/train.jsonl` | 1000 | 800 normal queries + 200 attack samples |
-| `data/synthetic/eval.jsonl` | 100 | Held-out normal queries (no attacks) |
-
-Each sample: `{"input": "<user query>", "output": {"persona": "...", "attack": bool, "search_predicate": {...}, "semantic_query": "..."}}`
-
-Attack samples use deterministic surface mutations (case changes, wrapper prefixes, unicode substitutions) to ensure variety without triggering model safety refusals during generation.
+| Sampling mode | Greedy + constrained | Nucleus sampling |
+| GPU memory utilization | 0.40 | 0.50 |
+| Max model length | 2048 | 2048 |
 
 ---
 
 ## Evaluation
 
 ```bash
-# Run on GPU machine after fine-tuning and vLLM serving the fine-tuned model:
-uv run scripts/evaluate.py --model-name dispatcher-llama-1b
+# Individual model evaluation (on GPU machine, vLLM running)
+uv run scripts/evaluate.py              # Dispatcher field-level F1
+uv run scripts/evaluate_concierge.py    # Concierge generative metrics
+
+# End-to-end pipeline evaluation (from any machine with network access)
+uv run scripts/evaluate_pipeline.py --base-url http://192.168.200.100:8080
+
+# Compare local vs GCP deployment
+uv run scripts/evaluate_pipeline.py \
+  --base-url http://192.168.200.100:8080 \
+  --compare-url https://<cloud-run-url>
 ```
 
-**Metrics:**
-- `persona_accuracy` — exact match (3-class)
-- `attack_accuracy` — exact match (binary)
-- `cuisine_precision` — exact match on non-null cuisine labels
-- `price_mae` — mean absolute error on non-null max_price predictions
-
-Results written to `data/synthetic/eval_results_dispatcher-llama-1b.json`.
+See `docs/evaluation_report.md` for full results across all configurations.
 
 ---
 
 ## Restaurant Data
 
-200 synthetic restaurants across 12 cuisines, generated via Claude (Bedrock).
+200 synthetic restaurants across 12 cuisines, generated via Claude (Bedrock) with quality tier ratings.
 
 | Tier | Count | Description |
 |---|---|---|
@@ -206,6 +243,8 @@ Results written to `data/synthetic/eval_results_dispatcher-llama-1b.json`.
 | 3 | 110 | Solid neighborhood favorite |
 | 2 | 40 | Mixed — one strength, one notable flaw |
 | 1 | 20 | Poor — overpriced, declining, or disappointing |
+
+Tier 1 restaurants are filtered out by the Librarian by default (`tier >= 2`).
 
 ---
 
@@ -215,12 +254,12 @@ Results written to `data/synthetic/eval_results_dispatcher-llama-1b.json`.
 
 ```json
 // Request
-{"query": "I want cheap Italian food under $20"}
+{"query": "I want cozy Italian for date night under $60"}
 
 // Response
 {
-  "suggestion": "...",
-  "elaboration": "...",
+  "suggestion": "San Gennaro delivers exactly what you want...",
+  "elaboration": "This Neapolitan trattoria features...",
   "persona": "normie",
   "attack": false
 }
@@ -232,4 +271,17 @@ Results written to `data/synthetic/eval_results_dispatcher-llama-1b.json`.
 {"status": "ok"}
 ```
 
-Interactive docs available at `http://localhost:8080/docs`.
+Interactive docs: `http://localhost:8080/docs`
+
+---
+
+## Documentation
+
+| File | Contents |
+|---|---|
+| `docs/architecture.md` | System design, data flow, AgentState schema |
+| `docs/models.md` | Model selection, fine-tuning methodology, training config, evaluation metrics |
+| `docs/inference.md` | Sampling parameters, quantization, vLLM configuration |
+| `docs/deployment.md` | Local and GCP deployment step-by-step |
+| `docs/api.md` | Full API reference with curl examples |
+| `docs/evaluation_report.md` | Pipeline evaluation results — v1, v2, v1+structured_outputs comparison |
