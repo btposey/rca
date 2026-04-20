@@ -1,0 +1,61 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: rca-pod
+  labels:
+    app: restaurant-concierge-agent
+spec:
+  restartPolicy: OnFailure
+  hostNetwork: true
+
+  volumes:
+    - name: postgres-data
+      hostPath:
+        path: POSTGRES_DATA_PATH_PLACEHOLDER
+        type: DirectoryOrCreate
+
+  containers:
+
+    # ── PostgreSQL + pgvector ────────────────────────────────────────────────
+    - name: postgres
+      image: docker.io/pgvector/pgvector:pg16
+      env:
+        - name: POSTGRES_USER
+          value: rca
+        - name: POSTGRES_PASSWORD
+          value: rca
+        - name: POSTGRES_DB
+          value: rca
+      volumeMounts:
+        - name: postgres-data
+          mountPath: /var/lib/postgresql/data
+
+    # ── Streamlit UI ─────────────────────────────────────────────────────────
+    - name: ui
+      image: localhost/rca-ui:latest
+      env:
+        - name: API_URL
+          value: http://192.168.200.100:8080
+
+    # ── FastAPI orchestration ────────────────────────────────────────────────
+    # vLLM runs natively on the host (ports 8000 + 8001) alongside this pod.
+    # Upgrade to deploy.sh (full pod) once podman >= 5.x is available.
+    - name: api
+      image: localhost/rca-api:latest
+      env:
+        - name: DATABASE_URL
+          value: postgresql+asyncpg://rca:rca@192.168.200.100:5432/rca
+        - name: VLLM_DISPATCHER_BASE_URL
+          value: http://192.168.200.100:8000/v1
+        - name: VLLM_DISPATCHER_MODEL
+          value: dispatcher-llama-1b
+        - name: VLLM_CONCIERGE_BASE_URL
+          value: http://192.168.200.100:8001/v1
+        - name: VLLM_CONCIERGE_MODEL
+          value: concierge-llama-3b
+        - name: ANTHROPIC_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: rca-secrets
+              key: anthropic_api_key
+              optional: true

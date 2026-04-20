@@ -1,0 +1,16 @@
+FROM docker.io/nvidia/cuda:12.8.0-cudnn-runtime-ubuntu24.04
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3.12 python3.12-venv python3-pip \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN pip install uv --break-system-packages
+
+WORKDIR /app
+
+RUN uv pip install --system --no-cache --break-system-packages vllm
+
+ENV HF_HOME=/models
+ENV TRANSFORMERS_NO_ADVISORY_WARNINGS=1
+
+ENTRYPOINT ["vllm", "serve"]

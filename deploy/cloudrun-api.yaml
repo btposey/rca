@@ -1,0 +1,77 @@
+apiVersion: serving.knative.dev/v1
+kind: Service
+metadata:
+  name: rca-api
+  # Replace <REGION> and <PROJECT_ID> with your values, or let gcp-setup.sh
+  # and the CI/CD workflow manage the annotation automatically.
+  annotations:
+    run.googleapis.com/ingress: all
+    run.googleapis.com/launch-stage: GA
+spec:
+  template:
+    metadata:
+      annotations:
+        # Scale to zero when idle; increase min-instances for lower cold-start latency
+        autoscaling.knative.dev/minScale: "1"
+        autoscaling.knative.dev/maxScale: "10"
+        # Cloud SQL connection — set to <PROJECT_ID>:<REGION>:<INSTANCE_NAME>
+        # This mounts the Cloud SQL Auth Proxy socket automatically.
+        # Replace with your actual connection name (printed by gcp-setup.sh).
+        run.googleapis.com/cloudsql-instances: "<PROJECT_ID>:<REGION>:rca-postgres"
+    spec:
+      # Service account created by gcp-setup.sh
+      serviceAccountName: rca-cloudrun-sa@<PROJECT_ID>.iam.gserviceaccount.com
+      # Request timeout — vLLM inference can be slow; keep generous
+      timeoutSeconds: 120
+      containers:
+        - name: rca-api
+          # Image is set by the CI/CD workflow; this is a placeholder.
+          # Format: <REGION>-docker.pkg.dev/<PROJECT_ID>/<GAR_REPOSITORY>/rca-api:<SHA>
+          image: us-central1-docker.pkg.dev/<PROJECT_ID>/<GAR_REPOSITORY>/rca-api:latest
+          ports:
+            - name: http1
+              containerPort: 8080
+          resources:
+            limits:
+              memory: 2Gi
+              cpu: "2"
+          env:
+            # Cloud SQL connection via unix socket (provided by the Auth Proxy).
+            # The path follows the pattern /cloudsql/<connection-name>/.s.PGSQL.5432
+            - name: DATABASE_URL
+              value: "postgresql+asyncpg://rca:<DB_PASSWORD>@/rca?host=/cloudsql/<PROJECT_ID>:<REGION>:rca-postgres"
+            # vLLM endpoints — replace with actual Cloud Run or GKE service URLs
+            # once rca-vllm is deployed (see TODO in deploy-gcp.yml).
+            - name: VLLM_DISPATCHER_BASE_URL
+              value: "http://vllm-dispatcher:8000/v1"
+            - name: VLLM_CONCIERGE_BASE_URL
+              value: "http://vllm-concierge:8001/v1"
+            # Model names must match the --served-model-name passed to vllm serve
+            - name: VLLM_DISPATCHER_MODEL
+              value: "dispatcher-llama-1b"
+            - name: VLLM_CONCIERGE_MODEL
+              value: "concierge-llama-3b"
+            # Optional: Anthropic API key for teacher model calls
+            # Uncomment and set via Secret Manager when needed:
+            # - name: ANTHROPIC_API_KEY
+            #   valueFrom:
+            #     secretKeyRef:
+            #       name: anthropic-api-key
+            #       key: latest
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 15
+            periodSeconds: 30
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            failureThreshold: 3
+  traffic:
+    - percent: 100
+      latestRevision: true

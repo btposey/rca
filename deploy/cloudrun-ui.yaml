@@ -1,0 +1,55 @@
+apiVersion: serving.knative.dev/v1
+kind: Service
+metadata:
+  name: rca-ui
+  annotations:
+    run.googleapis.com/ingress: all
+    run.googleapis.com/launch-stage: GA
+spec:
+  template:
+    metadata:
+      annotations:
+        # Scale to zero when idle — UI gets infrequent traffic
+        autoscaling.knative.dev/minScale: "0"
+        autoscaling.knative.dev/maxScale: "5"
+    spec:
+      # Service account created by gcp-setup.sh
+      serviceAccountName: rca-cloudrun-sa@<PROJECT_ID>.iam.gserviceaccount.com
+      timeoutSeconds: 60
+      containers:
+        - name: rca-ui
+          # Image is set by the CI/CD workflow; this is a placeholder.
+          # Format: <REGION>-docker.pkg.dev/<PROJECT_ID>/<GAR_REPOSITORY>/rca-ui:<SHA>
+          image: us-central1-docker.pkg.dev/<PROJECT_ID>/<GAR_REPOSITORY>/rca-ui:latest
+          ports:
+            - name: http1
+              containerPort: 8501
+          resources:
+            limits:
+              memory: 512Mi
+              cpu: "1"
+          env:
+            # Set to the Cloud Run URL of the rca-api service.
+            # The CI/CD workflow (deploy-gcp.yml) injects this automatically
+            # from the deploy-api job output.
+            # If deploying manually, replace with the rca-api service URL:
+            #   gcloud run services describe rca-api --region=<REGION> --format="value(status.url)"
+            - name: API_URL
+              value: "https://rca-api-<HASH>-<REGION_SHORT>.a.run.app"
+          livenessProbe:
+            httpGet:
+              path: /
+              port: 8501
+            initialDelaySeconds: 20
+            periodSeconds: 30
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 8501
+            initialDelaySeconds: 15
+            periodSeconds: 10
+            failureThreshold: 3
+  traffic:
+    - percent: 100
+      latestRevision: true

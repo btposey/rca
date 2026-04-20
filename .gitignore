@@ -1,0 +1,12 @@
+.env
+sync.sh
+models/
+postgres-data/
+__pycache__/
+*.pyc
+.venv/
+dist/
+*.egg-info/
+data/synthetic/*.jsonl
+data/restaurant_data/
+.pytest_cache/

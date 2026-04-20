@@ -1,0 +1,130 @@
+# pod_full.yaml — full pod deployment including containerized vLLM.
+# Requires podman >= 5.x for CDI GPU device passthrough in kube play.
+# Use deploy.sh (not deploy_native_vllm.sh) with this file.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: rca-pod
+  labels:
+    app: restaurant-concierge-agent
+spec:
+  restartPolicy: OnFailure
+
+  volumes:
+    - name: models
+      hostPath:
+        path: MODEL_HOST_PATH_PLACEHOLDER
+        type: DirectoryOrCreate
+    - name: postgres-data
+      hostPath:
+        path: POSTGRES_DATA_PATH_PLACEHOLDER
+        type: DirectoryOrCreate
+
+  containers:
+
+    # ── Stage 1: Dispatcher — Llama 3.2 1B (port 8000) ──────────────────────
+    - name: vllm-dispatcher
+      image: localhost/rca-vllm:latest
+      devices:
+        - deviceType: cdi
+          name: nvidia.com/gpu=0
+      args:
+        - "/models/dispatcher-llama-1b"
+        - "--served-model-name"
+        - "dispatcher-llama-1b"
+        - "--host"
+        - "0.0.0.0"
+        - "--port"
+        - "8000"
+        - "--quantization"
+        - "bitsandbytes"
+        - "--max-model-len"
+        - "4096"
+        - "--gpu-memory-utilization"
+        - "0.45"
+        - "--max-num-seqs"
+        - "8"
+      env:
+        - name: HF_HOME
+          value: /models
+      ports:
+        - containerPort: 8000
+          hostPort: 8000
+      volumeMounts:
+        - name: models
+          mountPath: /models
+      securityContext:
+        privileged: false
+
+    # ── Stage 3: Concierge — Llama 3.2 3B (port 8001) ───────────────────────
+    - name: vllm-concierge
+      image: localhost/rca-vllm:latest
+      devices:
+        - deviceType: cdi
+          name: nvidia.com/gpu=0
+      args:
+        - "/models/concierge-llama-3b"
+        - "--served-model-name"
+        - "concierge-llama-3b"
+        - "--host"
+        - "0.0.0.0"
+        - "--port"
+        - "8001"
+        - "--quantization"
+        - "bitsandbytes"
+        - "--max-model-len"
+        - "4096"
+        - "--gpu-memory-utilization"
+        - "0.45"
+      env:
+        - name: HF_HOME
+          value: /models
+      ports:
+        - containerPort: 8001
+          hostPort: 8001
+      volumeMounts:
+        - name: models
+          mountPath: /models
+      securityContext:
+        privileged: false
+
+    # ── PostgreSQL + pgvector ────────────────────────────────────────────────
+    - name: postgres
+      image: docker.io/pgvector/pgvector:pg16
+      env:
+        - name: POSTGRES_USER
+          value: rca
+        - name: POSTGRES_PASSWORD
+          value: rca
+        - name: POSTGRES_DB
+          value: rca
+      ports:
+        - containerPort: 5432
+          hostPort: 5432
+      volumeMounts:
+        - name: postgres-data
+          mountPath: /var/lib/postgresql/data
+
+    # ── FastAPI orchestration ────────────────────────────────────────────────
+    - name: api
+      image: localhost/rca-api:latest
+      env:
+        - name: DATABASE_URL
+          value: postgresql+asyncpg://rca:rca@localhost:5432/rca
+        - name: VLLM_DISPATCHER_BASE_URL
+          value: http://localhost:8000/v1
+        - name: VLLM_DISPATCHER_MODEL
+          value: dispatcher-llama-1b
+        - name: VLLM_CONCIERGE_BASE_URL
+          value: http://localhost:8001/v1
+        - name: VLLM_CONCIERGE_MODEL
+          value: concierge-llama-3b
+        - name: ANTHROPIC_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: rca-secrets
+              key: anthropic_api_key
+              optional: true
+      ports:
+        - containerPort: 8080
+          hostPort: 8080

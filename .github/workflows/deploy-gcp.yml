@@ -1,0 +1,266 @@
+name: Deploy to GCP
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+env:
+  PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
+  REGION: ${{ secrets.GCP_REGION }}
+  GAR_REPOSITORY: ${{ secrets.GAR_REPOSITORY }}
+  IMAGE_API: rca-api
+  IMAGE_VLLM: rca-vllm
+  IMAGE_UI: rca-ui
+
+jobs:
+  # ── Build & push all three images ────────────────────────────────────────────
+  build-and-push:
+    name: Build and push container images
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write   # Required for Workload Identity Federation
+
+    outputs:
+      api_image: ${{ steps.image-tags.outputs.api_image }}
+      vllm_image: ${{ steps.image-tags.outputs.vllm_image }}
+      ui_image: ${{ steps.image-tags.outputs.ui_image }}
+      registry: ${{ steps.image-tags.outputs.registry }}
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Authenticate to Google Cloud via Workload Identity Federation
+        id: auth
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.SERVICE_ACCOUNT }}
+
+      - name: Set up Cloud SDK
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Configure Docker for Artifact Registry
+        run: gcloud auth configure-docker ${{ env.REGION }}-docker.pkg.dev --quiet
+
+      - name: Compute image tags
+        id: image-tags
+        run: |
+          REGISTRY="${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ env.GAR_REPOSITORY }}"
+          SHORT_SHA="${GITHUB_SHA::8}"
+          echo "registry=${REGISTRY}" >> "$GITHUB_OUTPUT"
+          echo "api_image=${REGISTRY}/${{ env.IMAGE_API }}:${SHORT_SHA}"  >> "$GITHUB_OUTPUT"
+          echo "vllm_image=${REGISTRY}/${{ env.IMAGE_VLLM }}:${SHORT_SHA}" >> "$GITHUB_OUTPUT"
+          echo "ui_image=${REGISTRY}/${{ env.IMAGE_UI }}:${SHORT_SHA}"   >> "$GITHUB_OUTPUT"
+
+      - name: Build rca-api
+        run: |
+          docker build \
+            -f Dockerfile \
+            -t ${{ steps.image-tags.outputs.api_image }} \
+            -t ${{ steps.image-tags.outputs.registry }}/${{ env.IMAGE_API }}:latest \
+            .
+
+      - name: Build rca-vllm
+        run: |
+          docker build \
+            -f Dockerfile.vllm \
+            -t ${{ steps.image-tags.outputs.vllm_image }} \
+            -t ${{ steps.image-tags.outputs.registry }}/${{ env.IMAGE_VLLM }}:latest \
+            .
+
+      - name: Build rca-ui
+        run: |
+          docker build \
+            -f Dockerfile.ui \
+            -t ${{ steps.image-tags.outputs.ui_image }} \
+            -t ${{ steps.image-tags.outputs.registry }}/${{ env.IMAGE_UI }}:latest \
+            .
+
+      - name: Push rca-api
+        run: |
+          docker push ${{ steps.image-tags.outputs.api_image }}
+          docker push ${{ steps.image-tags.outputs.registry }}/${{ env.IMAGE_API }}:latest
+
+      - name: Push rca-vllm
+        run: |
+          docker push ${{ steps.image-tags.outputs.vllm_image }}
+          docker push ${{ steps.image-tags.outputs.registry }}/${{ env.IMAGE_VLLM }}:latest
+
+      - name: Push rca-ui
+        run: |
+          docker push ${{ steps.image-tags.outputs.ui_image }}
+          docker push ${{ steps.image-tags.outputs.registry }}/${{ env.IMAGE_UI }}:latest
+
+  # ── Deploy rca-api to Cloud Run ───────────────────────────────────────────────
+  deploy-api:
+    name: Deploy rca-api to Cloud Run
+    needs: build-and-push
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    outputs:
+      api_url: ${{ steps.deploy.outputs.url }}
+
+    steps:
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.SERVICE_ACCOUNT }}
+
+      - name: Deploy rca-api
+        id: deploy
+        uses: google-github-actions/deploy-cloudrun@v2
+        with:
+          service: rca-api
+          region: ${{ env.REGION }}
+          image: ${{ needs.build-and-push.outputs.api_image }}
+          # Cloud SQL connection via unix socket (set CLOUD_SQL_INSTANCE in gcp-setup.sh output)
+          flags: >-
+            --memory=2Gi
+            --cpu=2
+            --min-instances=1
+            --max-instances=10
+            --port=8080
+            --allow-unauthenticated
+          env_vars: |
+            DATABASE_URL=postgresql+asyncpg://rca:rca@/rca?host=/cloudsql/${{ env.PROJECT_ID }}:${{ env.REGION }}:rca-postgres
+            VLLM_DISPATCHER_BASE_URL=http://vllm-dispatcher:8000/v1
+            VLLM_CONCIERGE_BASE_URL=http://vllm-concierge:8001/v1
+            VLLM_DISPATCHER_MODEL=dispatcher-llama-1b
+            VLLM_CONCIERGE_MODEL=concierge-llama-3b
+
+      - name: Verify rca-api health
+        run: |
+          API_URL="${{ steps.deploy.outputs.url }}"
+          echo "Checking health at ${API_URL}/health ..."
+          for i in 1 2 3 4 5; do
+            STATUS=$(curl -s -o /dev/null -w "%{http_code}" "${API_URL}/health")
+            if [ "$STATUS" = "200" ]; then
+              echo "rca-api is healthy (HTTP 200)"
+              exit 0
+            fi
+            echo "Attempt ${i}: got HTTP ${STATUS}, retrying in 10s..."
+            sleep 10
+          done
+          echo "ERROR: rca-api health check failed after 5 attempts"
+          exit 1
+
+      - name: Rollback rca-api on failure
+        if: failure()
+        run: |
+          echo "Rolling back rca-api to previous revision..."
+          PREV=$(gcloud run revisions list \
+            --service=rca-api \
+            --region=${{ env.REGION }} \
+            --format="value(metadata.name)" \
+            --sort-by="~metadata.creationTimestamp" \
+            --limit=2 | tail -n1)
+          if [ -n "$PREV" ]; then
+            gcloud run services update-traffic rca-api \
+              --region=${{ env.REGION }} \
+              --to-revisions="${PREV}=100"
+            echo "Rolled back to revision: ${PREV}"
+          else
+            echo "No previous revision found — cannot roll back"
+          fi
+
+  # ── Deploy rca-ui to Cloud Run ────────────────────────────────────────────────
+  deploy-ui:
+    name: Deploy rca-ui to Cloud Run
+    needs:
+      - build-and-push
+      - deploy-api
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.SERVICE_ACCOUNT }}
+
+      - name: Deploy rca-ui
+        id: deploy
+        uses: google-github-actions/deploy-cloudrun@v2
+        with:
+          service: rca-ui
+          region: ${{ env.REGION }}
+          image: ${{ needs.build-and-push.outputs.ui_image }}
+          flags: >-
+            --memory=512Mi
+            --cpu=1
+            --min-instances=0
+            --max-instances=5
+            --port=8501
+            --allow-unauthenticated
+          env_vars: |
+            API_URL=${{ needs.deploy-api.outputs.api_url }}
+
+      - name: Verify rca-ui health
+        run: |
+          UI_URL="${{ steps.deploy.outputs.url }}"
+          echo "Checking rca-ui at ${UI_URL} ..."
+          for i in 1 2 3 4 5; do
+            STATUS=$(curl -s -o /dev/null -w "%{http_code}" "${UI_URL}")
+            if [ "$STATUS" = "200" ]; then
+              echo "rca-ui is reachable (HTTP 200)"
+              exit 0
+            fi
+            echo "Attempt ${i}: got HTTP ${STATUS}, retrying in 10s..."
+            sleep 10
+          done
+          echo "ERROR: rca-ui health check failed after 5 attempts"
+          exit 1
+
+      - name: Rollback rca-ui on failure
+        if: failure()
+        run: |
+          echo "Rolling back rca-ui to previous revision..."
+          PREV=$(gcloud run revisions list \
+            --service=rca-ui \
+            --region=${{ env.REGION }} \
+            --format="value(metadata.name)" \
+            --sort-by="~metadata.creationTimestamp" \
+            --limit=2 | tail -n1)
+          if [ -n "$PREV" ]; then
+            gcloud run services update-traffic rca-ui \
+              --region=${{ env.REGION }} \
+              --to-revisions="${PREV}=100"
+            echo "Rolled back to revision: ${PREV}"
+          else
+            echo "No previous revision found — cannot roll back"
+          fi
+
+  # ── rca-vllm: GPU workload — NOT deployed by this workflow ───────────────────
+  # TODO: rca-vllm requires a GPU and cannot run on standard Cloud Run.
+  #
+  # Option A — Cloud Run with GPU (preview as of 2025):
+  #   Cloud Run now supports NVIDIA L4 GPUs in select regions (us-central1).
+  #   Add --gpu=1 --gpu-type=nvidia-l4 --no-cpu-throttling to the deploy flags.
+  #   This is still in preview and may require allowlisting.
+  #   Reference: https://cloud.google.com/run/docs/configuring/services/gpu
+  #
+  # Option B — GKE node pool with GPU:
+  #   Create a GKE Autopilot or Standard cluster with an nvidia-l4 node pool.
+  #   Deploy rca-vllm as a Kubernetes Deployment + Service referencing the
+  #   rca-vllm image pushed above. Use node selectors / taints to target GPU nodes.
+  #   Expose via a ClusterIP Service; rca-api reaches it via internal DNS.
+  #   Reference: https://cloud.google.com/kubernetes-engine/docs/how-to/gpus
+  #
+  # In either case, the vLLM container needs /models mounted from a GCS FUSE
+  # volume (or pre-baked into the image, which is too large for practical CI).
+  # Use the GCS bucket created by deploy/gcp-setup.sh and mount with:
+  #   --add-volume=name=models,type=cloud-storage,bucket=<BUCKET>
+  #   --add-volume-mount=volume=models,mount-path=/models
+  #
+  # Until GPU deployment is configured, the API will fall back to whatever
+  # VLLM_DISPATCHER_BASE_URL / VLLM_CONCIERGE_BASE_URL point to.
