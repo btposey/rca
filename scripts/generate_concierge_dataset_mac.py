@@ -25,7 +25,7 @@ from rich.console import Console
 from rich.progress import track
 
 # Point the app config at the GPU machine before importing services
-GPU_HOST = "192.168.200.100"
+GPU_HOST = os.environ.get("GPU_HOST", "192.168.200.100")
 os.environ.setdefault("VLLM_DISPATCHER_BASE_URL", f"http://{GPU_HOST}:8000/v1")
 os.environ.setdefault("VLLM_CONCIERGE_BASE_URL",  f"http://{GPU_HOST}:8001/v1")
 os.environ.setdefault("DATABASE_URL", f"postgresql+asyncpg://rca:rca@{GPU_HOST}:5432/rca")

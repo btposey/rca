@@ -4,6 +4,17 @@ A 3-stage LLM inference pipeline that takes a natural-language restaurant reques
 
 ---
 
+> **Quick Start** — requires a Linux machine with a capable NVIDIA GPU.
+>
+> ```bash
+> make check   # verify host dependencies (Podman, nvidia-ctk, CUDA, ports)
+> make run     # deploy the full stack (downloads models, starts services, loads data)
+> ```
+>
+> The UI will be available at `http://localhost:8501` once the stack is up.
+
+---
+
 ## Architecture
 
 ```

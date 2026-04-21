@@ -57,7 +57,9 @@ check "nvidia CDI configured"      "nvidia-ctk cdi list 2>/dev/null | grep -q nv
 check ">=30GB free in /home"       "df /home --output=avail | tail -1 | awk '{exit (\$1/1024/1024 < 30)}'"
 
 # ── Model path ────────────────────────────────────────────────────────────────
-MODEL_PATH="${MODEL_HOST_PATH:-/home/brian/Workspaces/ai-class/final/models}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
+MODEL_PATH="${MODEL_HOST_PATH:-${PROJECT_ROOT}/models}"
 warn "Model path exists ($MODEL_PATH)"  "test -d '$MODEL_PATH'"
 
 # ── Ports ─────────────────────────────────────────────────────────────────────

@@ -77,8 +77,10 @@ info "CDI devices:"
 nvidia-ctk cdi list 2>/dev/null | sed 's/^/  /'
 
 # ── Host directories ──────────────────────────────────────────────────────────
-MODEL_PATH="${MODEL_HOST_PATH:-/home/brian/Workspaces/ai-class/final/models}"
-POSTGRES_PATH="${POSTGRES_DATA_PATH:-/home/brian/Workspaces/ai-class/final/postgres-data}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
+MODEL_PATH="${MODEL_HOST_PATH:-${PROJECT_ROOT}/models}"
+POSTGRES_PATH="${POSTGRES_DATA_PATH:-${PROJECT_ROOT}/data/postgres}"
 
 info "Creating host directories..."
 mkdir -p "$MODEL_PATH"

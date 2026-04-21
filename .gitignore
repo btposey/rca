@@ -2,11 +2,12 @@
 sync.sh
 models/
 postgres-data/
+postgres-data-*/
+data/postgres/
 __pycache__/
 *.pyc
 .venv/
 dist/
 *.egg-info/
 data/synthetic/*.jsonl
-data/restaurant_data/
 .pytest_cache/

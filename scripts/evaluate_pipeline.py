@@ -281,7 +281,7 @@ def print_comparison_table(m1: dict, m2: dict, label1: str, label2: str) -> None
 
 @app.command()
 def main(
-    base_url: str = typer.Option("http://192.168.200.100:8080", help="Primary endpoint URL"),
+    base_url: str = typer.Option("http://localhost:8080", help="Primary endpoint URL"),
     compare_url: Optional[str] = typer.Option(None, help="Second endpoint to compare against"),
     output: Optional[Path] = typer.Option(None, help="Save results JSON to this path"),
 ) -> None:

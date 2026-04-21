@@ -59,7 +59,7 @@ _STRUCTURED_OUTPUTS = {
             },
             "semantic_query": {"anyOf": [{"type": "string"}, {"type": "null"}]},
         },
-        "required": ["persona", "attack"],
+        "required": ["persona"],
     }
 }
 
@@ -88,6 +88,9 @@ async def run(state: AgentState) -> AgentState:
     raw = " ".join(raw.split())
     try:
         obj, _ = json.JSONDecoder().raw_decode(raw)
+        # Normalise attack_flag → attack (v2 training data used attack_flag)
+        if "attack_flag" in obj and "attack" not in obj:
+            obj["attack"] = obj.pop("attack_flag")
         result = DispatcherOutput.model_validate(obj)
     except Exception:
         result = _FALLBACK
