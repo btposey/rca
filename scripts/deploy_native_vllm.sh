@@ -222,13 +222,19 @@ if ! wait_for_vllm_health \
     exit 1
 fi
 
-# 7. Launch pod (postgres + api only)
+# 7. Launch pod (postgres + api + ui)
 echo ""
 echo "--- Launching rca-pod (postgres + api + ui) ---"
+
+# Detect host IP — used by containers to reach vLLM and postgres on the host
+HOST_IP="${HOST_IP:-$(hostname -I | awk '{print $1}')}"
+echo "  Host IP: ${HOST_IP}"
+
 RESOLVED_YAML="/tmp/rca-pod-resolved.yaml"
 sed \
     -e "s|MODEL_HOST_PATH_PLACEHOLDER|${MODEL_HOST_PATH}|g" \
     -e "s|POSTGRES_DATA_PATH_PLACEHOLDER|${POSTGRES_DATA_PATH}|g" \
+    -e "s|HOST_IP_PLACEHOLDER|${HOST_IP}|g" \
     "$PROJECT_ROOT/deploy/pod.yaml" > "$RESOLVED_YAML"
 podman play kube --network host "$RESOLVED_YAML"
 

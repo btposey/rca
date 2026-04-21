@@ -35,7 +35,7 @@ spec:
       image: localhost/rca-ui:latest
       env:
         - name: API_URL
-          value: http://192.168.200.100:8080
+          value: http://HOST_IP_PLACEHOLDER:8080
 
     # ── FastAPI orchestration ────────────────────────────────────────────────
     # vLLM runs natively on the host (ports 8000 + 8001) alongside this pod.
@@ -44,13 +44,13 @@ spec:
       image: localhost/rca-api:latest
       env:
         - name: DATABASE_URL
-          value: postgresql+asyncpg://rca:rca@192.168.200.100:5432/rca
+          value: postgresql+asyncpg://rca:rca@HOST_IP_PLACEHOLDER:5432/rca
         - name: VLLM_DISPATCHER_BASE_URL
-          value: http://192.168.200.100:8000/v1
+          value: http://HOST_IP_PLACEHOLDER:8000/v1
         - name: VLLM_DISPATCHER_MODEL
           value: dispatcher-llama-1b
         - name: VLLM_CONCIERGE_BASE_URL
-          value: http://192.168.200.100:8001/v1
+          value: http://HOST_IP_PLACEHOLDER:8001/v1
         - name: VLLM_CONCIERGE_MODEL
           value: concierge-llama-3b
         - name: ANTHROPIC_API_KEY
